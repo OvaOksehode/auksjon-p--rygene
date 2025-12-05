@@ -11,17 +11,29 @@ class EliteAuctionAgent:
         self.rounds_played = 0
         self.consecutive_losses = 0
         self.my_wins = 0
+        self.last_round_bids = {}  # Track what we bid last round
         
-        # Setup log file
+        # Setup log files
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Main log - one row per round
         self.log_file = os.path.join(log_dir, f"elite_agent_{timestamp}.txt")
         with open(self.log_file, "w") as f:
-            f.write("Round,Gold,Points,Strategy,TargetAuction,BidAmount,ExpectedValue\n")
+            f.write("Round,Gold,Points,Strategy,NumBidsPlaced,TotalBidAmount,AvgExpectedValue\n")
+        
+        # Detailed bid log - one row per bid
+        self.bid_detail_file = os.path.join(log_dir, f"elite_bids_{timestamp}.txt")
+        with open(self.bid_detail_file, "w") as f:
+            f.write("Round,AuctionID,BidAmount,ExpectedValue,Won,SecondHighestBid,Overbid,OverbidPercent\n")
     
-    def _log_round(self, round_num, my_state, strategy, target_id, bid, expected_val):
+    def _log_round(self, round_num, my_state, strategy, num_bids, total_bid, avg_expected):
         with open(self.log_file, "a") as f:
-            f.write(f"{round_num},{my_state['gold']},{my_state['points']},{strategy},{target_id},{bid},{expected_val:.2f}\n")
+            f.write(f"{round_num},{my_state['gold']},{my_state['points']},{strategy},{num_bids},{total_bid},{avg_expected:.2f}\n")
+    
+    def _log_bid_detail(self, round_num, auction_id, bid_amount, expected_val, won, second_bid, overbid, overbid_pct):
+        with open(self.bid_detail_file, "a") as f:
+            f.write(f"{round_num},{auction_id},{bid_amount},{expected_val:.2f},{won},{second_bid},{overbid},{overbid_pct:.1f}\n")
     
     def _expected_value(self, auction):
         """Calculate expected points from auction"""
@@ -72,8 +84,6 @@ class EliteAuctionAgent:
         opportunity_cost = bid_amount * 0.5 * (1 + bank_interest)
         
         # Net return: points gained vs gold lost
-        # Assume 1 point = pool_gold / total_points ratio (dynamic pricing)
-        # For now, use a heuristic: points are worth more early, less late
         point_value = 100 / (1 + self.rounds_played * 0.05)  # Diminishing point value
         
         expected_return = expected_pts * point_value
@@ -130,31 +140,40 @@ class EliteAuctionAgent:
         bank_interest = bank_state["bank_interest_per_round"][0] if bank_state["bank_interest_per_round"] else 0
         bank_limit = bank_state["bank_limit_per_round"][0] if bank_state["bank_limit_per_round"] else 10000
         
-        # Update bid history and opponent tracking
+        # === ANALYZE PREVIOUS ROUND RESULTS ===
         if prev_auctions:
             for prev_id, prev_auction in prev_auctions.items():
                 if prev_auction.get("bids"):
-                    winner = prev_auction["bids"][0]
+                    bids_list = prev_auction["bids"]
+                    winner = bids_list[0]
                     winner_id = winner.get("a_id")
                     winning_bid = winner.get("gold", 0)
+                    
+                    # Get second highest bid
+                    second_bid = bids_list[1].get("gold", 0) if len(bids_list) > 1 else 0
                     
                     self.bid_history[prev_id].append(winning_bid)
                     
                     # Track opponent aggression
                     if winner_id != agent_id:
                         expected_pts = self._expected_value(prev_auction)
-                        # High bid per point = aggressive
                         bid_per_point = winning_bid / expected_pts if expected_pts > 0 else 1
                         self.opponent_aggression[winner_id] = 0.8 * self.opponent_aggression[winner_id] + 0.2 * (bid_per_point / 10)
                     
-                    # Track my performance
-                    if winner_id == agent_id:
-                        self.consecutive_losses = 0
-                        self.my_wins += 1
-                    else:
-                        # Check if I bid on this
-                        my_bid = next((b.get("gold", 0) for b in prev_auction.get("bids", []) if b.get("a_id") == agent_id), 0)
-                        if my_bid > 0:
+                    # Log details if we bid on this auction
+                    if prev_id in self.last_round_bids:
+                        my_bid = self.last_round_bids[prev_id]
+                        won = (winner_id == agent_id)
+                        overbid = winning_bid - second_bid if won else 0
+                        overbid_pct = (overbid / second_bid * 100) if won and second_bid > 0 else 0
+                        expected_val = self._expected_value(prev_auction)
+                        
+                        self._log_bid_detail(round - 1, prev_id, my_bid, expected_val, won, second_bid, overbid, overbid_pct)
+                        
+                        if won:
+                            self.consecutive_losses = 0
+                            self.my_wins += 1
+                        else:
                             self.consecutive_losses += 1
         
         bids = {}
@@ -178,35 +197,40 @@ class EliteAuctionAgent:
             
             for i in range(num_targets):
                 auction = auction_scores[i]
-                # Overbid estimate by 15% to ensure wins
-                bid_amount = int(min(budget_per_auction, auction['bid'] * 1.15))
+                # Overbid estimate by 5% to ensure wins (reduced from 15%)
+                bid_amount = int(min(budget_per_auction, auction['bid'] * 1.05))
                 if bid_amount >= 1:
                     bids[auction['id']] = bid_amount
                     
         elif my_gold < 1000:
             # LOW GOLD: Conservative, high-efficiency bids only
             strategy = "conservative"
-            # Only bid on best ROI auction
-            best = auction_scores[0]
-            bid_amount = int(min(total_budget, best['bid'] * 1.1))
-            if bid_amount >= 1:
-                bids[best['id']] = bid_amount
+            # Bid on top 2 auctions to increase win chance
+            num_targets = min(2, len(auction_scores))
+            budget_per_auction = total_budget / num_targets
+            
+            for i in range(num_targets):
+                auction = auction_scores[i]
+                bid_amount = int(min(budget_per_auction, auction['bid'] * 1.03))
+                if bid_amount >= 1:
+                    bids[auction['id']] = bid_amount
                 
         else:
-            # MID/LATE GAME: Maximize points accumulation
+            # MID/LATE GAME: Maximize points accumulation with multiple bids
             strategy = "maximize_points"
-            # Spread bids across top auctions
-            num_targets = min(4, len(auction_scores))
+            # Spread bids across top 3-5 auctions
+            num_targets = min(5, len(auction_scores))
             allocated = 0
             
             for i in range(num_targets):
                 auction = auction_scores[i]
                 # Allocate proportional to expected value
-                weight = auction['expected_pts'] / sum(a['expected_pts'] for a in auction_scores[:num_targets])
+                total_expected = sum(a['expected_pts'] for a in auction_scores[:num_targets])
+                weight = auction['expected_pts'] / total_expected if total_expected > 0 else 1.0 / num_targets
                 budget = total_budget * weight
                 
-                # Bid slightly above estimate
-                bid_amount = int(min(budget, auction['bid'] * 1.12))
+                # Bid slightly above estimate (reduced from 12% to 3%)
+                bid_amount = int(min(budget, auction['bid'] * 1.03))
                 if bid_amount >= 1 and allocated + bid_amount <= total_budget:
                     bids[auction['id']] = bid_amount
                     allocated += bid_amount
@@ -226,11 +250,14 @@ class EliteAuctionAgent:
         if my_gold < 300 and my_points > 15:
             pool_spend = min(3, my_points - 10)
         
-        # Log the round
-        target_id = list(bids.keys())[0] if bids else "none"
-        bid_val = bids.get(target_id, 0)
-        expected_val = auction_scores[0]['expected_pts'] if auction_scores else 0
-        self._log_round(round, my_state, strategy, target_id, bid_val, expected_val)
+        # Store bids for next round analysis
+        self.last_round_bids = bids.copy()
+        
+        # Log the round summary
+        num_bids = len(bids)
+        total_bid_amount = sum(bids.values())
+        avg_expected = sum(self._expected_value(auctions[aid]) for aid in bids) / num_bids if num_bids > 0 else 0
+        self._log_round(round, my_state, strategy, num_bids, total_bid_amount, avg_expected)
         
         return {"bids": bids, "pool": pool_spend}
 
