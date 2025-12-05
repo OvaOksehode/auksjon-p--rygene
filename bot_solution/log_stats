@@ -1,0 +1,71 @@
+import matplotlib.pyplot as plt
+import csv
+import os
+import sys
+
+
+def plot_agent_log(log_file: str):
+    rounds = []
+    gold = []
+    points = []
+
+    # Read the CSV-like log
+    with open(log_file, "r") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)  # skip header if exists
+        for row in reader:
+            if len(row) < 3:
+                continue
+            try:
+                r = int(row[0])
+                g = float(row[1])
+                p = float(row[2])
+                rounds.append(r)
+                gold.append(g)
+                points.append(p)
+            except ValueError:
+                continue
+
+    # --- Plot ---
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    color1 = "#DAA520"   # gold color
+    ax1.set_xlabel("Round")
+    ax1.set_ylabel("Gold", color=color1)
+    ax1.plot(rounds, gold, color=color1, linewidth=2, label="Gold")
+    ax1.tick_params(axis="y", labelcolor=color1)
+
+    # Create second y-axis for points
+    ax2 = ax1.twinx()
+    color2 = "#1E90FF"   # blue color
+    ax2.set_ylabel("Points", color=color2)
+    ax2.plot(rounds, points, color=color2, linewidth=2, label="Points")
+    ax2.tick_params(axis="y", labelcolor=color2)
+
+    # Add title and grid
+    plt.title(f"Agent Performance: {os.path.basename(log_file)}")
+    fig.tight_layout()
+    plt.grid(True, linestyle="--", alpha=0.5)
+
+    # Add legends
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left")
+
+    plt.show()
+
+
+if __name__ == "__main__":
+    # Get path from command line argument
+    if len(sys.argv) < 2:
+        print("❌ Usage: python bot_solution/log_stats.py <path_to_log_file>")
+        sys.exit(1)
+
+    log_path = sys.argv[1]
+
+    if not os.path.exists(log_path):
+        print(f"❌ Log file not found: {log_path}")
+        sys.exit(1)
+
+    print(f"📊 Plotting log file: {log_path}")
+    plot_agent_log(log_path)
